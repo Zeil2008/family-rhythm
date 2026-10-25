@@ -59,8 +59,9 @@ test("new installation requires setup", async () => {
 test("version endpoint identifies the deployed feature set", async () => {
   const { response, payload } = await request("/api/version");
   assert.equal(response.status, 200);
-  assert.equal(payload.version, "1.2.1");
+  assert.equal(payload.version, "1.3.0");
   assert.equal(payload.feature, "multi-assignee-schedule");
+  assert.ok(payload.features.includes("in-app-dialogs"));
 });
 
 test("creates a family and starts an authenticated parent session", async () => {
@@ -579,4 +580,11 @@ test("public app shell is served", async () => {
   assert.equal(response.status, 200);
   assert.match(await response.text(), /家庭节奏/);
   assert.match(response.headers.get("content-security-policy"), /default-src 'self'/);
+
+  const script = await fetch(`${baseUrl}/app.js`);
+  assert.equal(script.status, 200);
+  const source = await script.text();
+  assert.doesNotMatch(source, /window\.(alert|confirm|prompt)\(/);
+  assert.match(source, /data-form="confirm-dialog"/);
+  assert.match(source, /data-form="prompt-dialog"/);
 });

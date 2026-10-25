@@ -702,6 +702,12 @@ function createApplication({
       return sendJson(res, 200, {
         version: APP_VERSION,
         feature: "multi-assignee-schedule",
+        features: [
+          "multi-assignee-schedule",
+          "in-app-dialogs",
+          "photo-avatars",
+          "deduction-rules",
+        ],
       });
     }
 

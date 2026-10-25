@@ -1446,9 +1446,99 @@ function openModal(title, subtitle, body) {
   document.body.style.overflow = "hidden";
 }
 
-function closeModal() {
+let pendingDialog = null;
+
+function clearDialogLayer() {
   document.getElementById("modal-root").innerHTML = "";
   document.body.style.overflow = "";
+}
+
+function closeModal() {
+  const pending = pendingDialog;
+  pendingDialog = null;
+  clearDialogLayer();
+  if (pending) pending.resolve(pending.cancelValue);
+}
+
+function settlePendingDialog(value) {
+  const pending = pendingDialog;
+  pendingDialog = null;
+  clearDialogLayer();
+  if (pending) pending.resolve(value);
+}
+
+function showConfirmDialog({
+  title,
+  message,
+  confirmText = "确认",
+  cancelText = "取消",
+  danger = false,
+}) {
+  if (pendingDialog) closeModal();
+  return new Promise((resolve) => {
+    pendingDialog = { resolve, cancelValue: false };
+    openModal(
+      title,
+      "",
+      `
+        <form class="form-stack" data-form="confirm-dialog">
+          <p class="dialog-message">${escapeHtml(message)}</p>
+          <div class="form-actions">
+            <button class="btn ${danger ? "btn-danger-soft" : "btn-primary"} btn-lg" type="submit">${escapeHtml(confirmText)}</button>
+            <button class="btn btn-secondary btn-lg" type="button" data-action="close-modal">${escapeHtml(cancelText)}</button>
+          </div>
+        </form>
+      `
+    );
+    requestAnimationFrame(() => {
+      document.querySelector('form[data-form="confirm-dialog"] button[type="submit"]')?.focus();
+    });
+  });
+}
+
+function showPromptDialog({
+  title,
+  message,
+  label,
+  value = "",
+  placeholder = "",
+  confirmText = "保存",
+  required = false,
+  multiline = true,
+}) {
+  if (pendingDialog) closeModal();
+  return new Promise((resolve) => {
+    pendingDialog = { resolve, cancelValue: null };
+    openModal(
+      title,
+      "",
+      `
+        <form class="form-stack" data-form="prompt-dialog" data-required="${required ? "true" : "false"}">
+          <p class="dialog-message">${escapeHtml(message)}</p>
+          <div class="field">
+            <label for="dialog-input">${escapeHtml(label)}</label>
+            ${
+              multiline
+                ? `<textarea class="textarea" id="dialog-input" data-dialog-focus maxlength="500" placeholder="${escapeHtml(placeholder)}">${escapeHtml(value)}</textarea>`
+                : `<input class="input" id="dialog-input" data-dialog-focus maxlength="500" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}">`
+            }
+          </div>
+          <p class="form-error" data-form-error></p>
+          <div class="form-actions">
+            <button class="btn btn-primary btn-lg" type="submit">${escapeHtml(confirmText)}</button>
+            <button class="btn btn-secondary btn-lg" type="button" data-action="close-modal">取消</button>
+          </div>
+        </form>
+      `
+    );
+    requestAnimationFrame(() => {
+      const input = document.getElementById("dialog-input");
+      if (input) {
+        input.focus();
+        input.setSelectionRange?.(input.value.length, input.value.length);
+      }
+    });
+  });
 }
 
 function formError(form, message) {
@@ -1951,6 +2041,21 @@ async function handleSubmit(event) {
   formError(form, "");
   if (submit) submit.disabled = true;
   try {
+    if (kind === "confirm-dialog") {
+      settlePendingDialog(true);
+      return;
+    }
+
+    if (kind === "prompt-dialog") {
+      const input = form.querySelector("#dialog-input");
+      const value = input?.value.trim() || "";
+      if (form.dataset.required === "true" && !value) {
+        throw new Error("请填写内容后再继续");
+      }
+      settlePendingDialog(value);
+      return;
+    }
+
     if (kind === "setup") {
       const data = Object.fromEntries(new FormData(form));
       if (data.childName && !data.childPin) throw new Error("请为孩子设置登录密码");
@@ -2216,19 +2321,34 @@ async function handleAction(event) {
       );
       if (rule) await openDeductionModal(rule);
     } else if (action === "delete-deduction") {
-      if (!window.confirm("删除后这项扣分约定不再显示，历史记录仍会保留。确定删除吗？")) return;
+      if (!(await showConfirmDialog({
+        title: "删除扣分约定",
+        message: "删除后这项扣分约定不再显示，历史记录仍会保留。确定删除吗？",
+        confirmText: "删除",
+        danger: true,
+      }))) return;
       await api(`/api/deduction-rules/${target.dataset.ruleId}`, { method: "DELETE" });
       toast("扣分项已删除");
       await navigate("manage");
     } else if (action === "accept-deduction") {
-      if (!window.confirm("接受这份扣分约定后，家长可按约定记录警告和扣分。确定接受吗？")) return;
+      if (!(await showConfirmDialog({
+        title: "接受扣分约定",
+        message: "接受后，家长可按约定记录警告和扣分。请确认你已经理解具体行为和后果。",
+        confirmText: "接受约定",
+      }))) return;
       await api(`/api/deduction-rules/${target.dataset.ruleId}/accept`, {
         method: "POST",
       });
       toast("已接受扣分约定");
       await navigate("today");
     } else if (action === "record-deduction") {
-      const note = window.prompt("记录本次行为说明（可留空）：", "");
+      const note = await showPromptDialog({
+        title: "记录一次行为",
+        message: "系统会先消耗警告次数；警告用完后再次记录才会扣分。",
+        label: "本次行为说明（可留空）",
+        placeholder: "例如：提醒后仍未把物品放回原处",
+        confirmText: "确认记录",
+      });
       if (note === null) return;
       const result = await api(
         `/api/deduction-rules/${target.dataset.ruleId}/record`,
@@ -2243,7 +2363,11 @@ async function handleAction(event) {
       }
       await navigate("manage");
     } else if (action === "reset-deduction") {
-      if (!window.confirm("将警告次数重置为 0，并开启新一轮提醒吗？")) return;
+      if (!(await showConfirmDialog({
+        title: "开启新一轮警告",
+        message: "警告次数将重置为 0，之后会重新从第一次警告开始记录。",
+        confirmText: "重新开始",
+      }))) return;
       await api(`/api/deduction-rules/${target.dataset.ruleId}/reset`, {
         method: "POST",
         body: {},
@@ -2296,12 +2420,21 @@ async function handleAction(event) {
       ].find((item) => item.id === Number(target.dataset.taskId));
       if (task) await openTaskModal(task);
     } else if (action === "delete-task") {
-      if (!window.confirm("删除后，这个日程之后的日期将不再出现。历史完成记录仍会保留。确定删除吗？")) return;
+      if (!(await showConfirmDialog({
+        title: "删除日程模板",
+        message: "删除后，这个日程之后的日期将不再出现。积分流水和历史成果仍会保留。",
+        confirmText: "删除",
+        danger: true,
+      }))) return;
       await api(`/api/tasks/${target.dataset.taskId}`, { method: "DELETE" });
       toast("任务已删除");
       await navigate(state.view);
     } else if (action === "accept-task") {
-      if (!window.confirm("接受这份家庭约定后，任务会按约定频次加入你的日程。确定接受吗？")) return;
+      if (!(await showConfirmDialog({
+        title: "接受家庭约定",
+        message: "接受后，任务会按约定频次加入你的日程，完成时需要提交成果并由家长验收。",
+        confirmText: "接受约定",
+      }))) return;
       await api(`/api/tasks/${target.dataset.taskId}/accept`, { method: "POST" });
       toast("已接受约定，任务开始生效");
       await navigate("today");
@@ -2309,8 +2442,15 @@ async function handleAction(event) {
       const status = target.dataset.status;
       let note = "";
       if (status === "rejected") {
-        note = window.prompt("写下具体修改建议，孩子会看到：", "请调整任务难度或完成标准后再提交。") || "";
-        if (!note.trim()) return;
+        note = await showPromptDialog({
+          title: "退回自建任务",
+          message: "写下具体修改建议，孩子会看到并可以修改后重新提交。",
+          label: "给孩子的修改建议",
+          value: "请调整任务难度或完成标准后再提交。",
+          confirmText: "退回修改",
+          required: true,
+        });
+        if (note === null) return;
       }
       await api(`/api/tasks/${target.dataset.taskId}/review`, {
         method: "POST",
@@ -2325,7 +2465,12 @@ async function handleAction(event) {
     } else if (action === "change-avatar") {
       openAvatarModal();
     } else if (action === "remove-avatar") {
-      if (!window.confirm("移除头像照片，并使用姓名首字作为头像吗？")) return;
+      if (!(await showConfirmDialog({
+        title: "移除头像照片",
+        message: "照片会被移除，并使用姓名首字作为头像。",
+        confirmText: "移除照片",
+        danger: true,
+      }))) return;
       await api("/api/me/avatar", { method: "DELETE" });
       closeModal();
       toast("头像照片已移除");
@@ -2333,13 +2478,21 @@ async function handleAction(event) {
     } else if (action === "redeem-reward") {
       const reward = state.rewards.find((item) => item.id === Number(target.dataset.rewardId));
       if (!reward) return;
-      if (!window.confirm(`用 ${reward.cost} 积分兑换“${reward.title}”吗？兑换申请会扣除积分，家长退回时会返还。`)) return;
+      if (!(await showConfirmDialog({
+        title: "确认兑换奖励",
+        message: `将使用 ${reward.cost} 积分兑换“${reward.title}”。提交时会暂扣积分，家长退回后会返还。`,
+        confirmText: "提交兑换",
+      }))) return;
       const result = await api(`/api/rewards/${reward.id}/redeem`, { method: "POST" });
       state.user.points = result.points;
       toast(result.status === "approved" ? "兑换成功！" : "兑换申请已提交");
       await navigate("rewards");
     } else if (action === "cancel-redemption") {
-      if (!window.confirm("取消这次兑换申请并退回积分吗？")) return;
+      if (!(await showConfirmDialog({
+        title: "取消兑换申请",
+        message: "取消后本次兑换将失效，已暂扣的积分会退回。",
+        confirmText: "取消申请并退回积分",
+      }))) return;
       await api(`/api/redemptions/${target.dataset.redemptionId}/cancel`, { method: "POST" });
       toast("兑换已取消，积分已退回");
       await navigate("rewards");

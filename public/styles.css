@@ -2499,6 +2499,13 @@ p {
   padding: 5px 24px 24px;
 }
 
+.dialog-message {
+  margin: 0;
+  color: #42514d;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
 .modal-close {
   border: 0;
   width: 34px;

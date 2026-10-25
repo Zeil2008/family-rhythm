@@ -87,6 +87,7 @@ GET /api/version
 - 周日程视图按成员分组，可查看一周安排。
 - 家庭页显示 7 天完成趋势、成员成长榜和家庭积分。
 - 手机、iPad 和桌面浏览器自适应。
+- 所有确认和说明输入均使用站内模态框，不触发浏览器原生对话框。
 - 支持 PWA 和添加到主屏幕。
 
 ## 快速启动
@@ -100,7 +101,7 @@ node server.js
 打开 <http://localhost:3000>，按首次设置页面创建家庭。服务同时监听局域网地址，启动日志会打印版本号和访问地址。
 
 ```text
-家庭节奏 v1.2.1 已启动：http://localhost:3000
+家庭节奏 v1.3.0 已启动：http://localhost:3000
 局域网访问：http://192.168.1.10:3000
 ```
 
@@ -135,7 +136,7 @@ Invoke-RestMethod http://localhost:3000/api/version
 正常会返回：
 
 ```json
-{"version":"1.2.1","feature":"multi-assignee-schedule"}
+{"version":"1.3.0","feature":"multi-assignee-schedule"}
 ```
 
 ## Docker 部署

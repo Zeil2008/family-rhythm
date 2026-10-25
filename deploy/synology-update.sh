@@ -5,6 +5,7 @@ APP_DIR="/volume1/docker/family-rhythm"
 BACKUP_ROOT="/volume1/docker/family-rhythm-backups"
 TOOL_BIN="/var/packages/ContainerManager/target/usr/bin"
 STAMP="$(date +%Y%m%d-%H%M%S)"
+UPDATE_ZIP="${1:-$APP_DIR/family-rhythm-nas-v1.3.0.zip}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "请使用 sudo 运行：sudo sh $APP_DIR/deploy/synology-update.sh"
@@ -14,6 +15,14 @@ fi
 cd "$APP_DIR"
 if [ ! -f docker-compose.yml ] || [ ! -f server.js ]; then
   echo "错误：$APP_DIR 不是正确的项目目录。"
+  exit 1
+fi
+if [ ! -f "$UPDATE_ZIP" ]; then
+  echo "错误：找不到更新包 $UPDATE_ZIP"
+  exit 1
+fi
+if ! command -v unzip >/dev/null 2>&1; then
+  echo "错误：NAS 上找不到 unzip 命令。"
   exit 1
 fi
 
@@ -35,13 +44,16 @@ mkdir -p "$BACKUP_ROOT"
 tar -czf "$BACKUP_ROOT/data-$STAMP.tar.gz" data
 echo "备份完成：$BACKUP_ROOT/data-$STAMP.tar.gz"
 
-echo "[3/5] 清理旧构建并重新构建"
+echo "[3/5] 解压新版代码（不会覆盖 data）"
+unzip -oq "$UPDATE_ZIP" -d "$APP_DIR"
+
+echo "[4/5] 清理旧构建并重新构建"
 "$COMPOSE" build --no-cache
 
-echo "[4/5] 使用新镜像启动"
+echo "[5/5] 使用新镜像启动"
 "$COMPOSE" up -d --force-recreate
 
-echo "[5/5] 当前容器状态"
+echo "当前容器状态"
 "$COMPOSE" ps
 
 echo "应用版本："

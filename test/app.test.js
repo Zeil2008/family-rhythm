@@ -422,6 +422,29 @@ test("one schedule can be assigned to multiple members with independent acceptan
     shared.map((occurrence) => occurrence.memberId).sort((a, b) => a - b),
     [childId, secondChildId].sort((a, b) => a - b)
   );
+
+  const secondReport = await request("/api/occurrences/complete", {
+    method: "POST",
+    cookie: secondCookie,
+    body: {
+      taskId: created.payload.task.id,
+      date: today(),
+      evidenceNote: "小禾已经完成今天的阅读",
+    },
+  });
+  assert.equal(secondReport.response.status, 200);
+  assert.equal(secondReport.payload.status, "pending");
+
+  const pending = await request("/api/completions?status=pending", {
+    cookie: parentCookie,
+  });
+  assert.ok(
+    pending.payload.completions.some(
+      (completion) =>
+        completion.taskId === created.payload.task.id &&
+        completion.memberId === secondChildId
+    )
+  );
 });
 
 test("reward redemption reserves points and parent approval finalizes it", async () => {

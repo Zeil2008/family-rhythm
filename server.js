@@ -6,6 +6,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { URL } = require("node:url");
+const { version: APP_VERSION } = require("./package.json");
 const { openDatabase } = require("./src/database");
 const {
   addDays,
@@ -695,6 +696,13 @@ function createApplication({
 
     if (method === "GET" && pathname === "/api/auth") {
       return sendJson(res, 200, authContext({ user }));
+    }
+
+    if (method === "GET" && pathname === "/api/version") {
+      return sendJson(res, 200, {
+        version: APP_VERSION,
+        feature: "multi-assignee-schedule",
+      });
     }
 
     if (method === "POST" && pathname === "/api/setup") {
@@ -2050,7 +2058,7 @@ if (require.main === module) {
   const host = process.env.HOST || "0.0.0.0";
   const app = createApplication();
   app.server.listen(port, host, () => {
-    console.log(`家庭节奏已启动：http://localhost:${port}`);
+    console.log(`家庭节奏 v${APP_VERSION} 已启动：http://localhost:${port}`);
     if (host === "0.0.0.0") {
       for (const addresses of Object.values(os.networkInterfaces())) {
         for (const address of addresses || []) {

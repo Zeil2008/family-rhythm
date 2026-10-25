@@ -56,6 +56,13 @@ test("new installation requires setup", async () => {
   assert.equal(payload.setupRequired, true);
 });
 
+test("version endpoint identifies the deployed feature set", async () => {
+  const { response, payload } = await request("/api/version");
+  assert.equal(response.status, 200);
+  assert.equal(payload.version, "1.2.1");
+  assert.equal(payload.feature, "multi-assignee-schedule");
+});
+
 test("creates a family and starts an authenticated parent session", async () => {
   const { response, payload } = await request("/api/setup", {
     method: "POST",

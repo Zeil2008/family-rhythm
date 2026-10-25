@@ -1249,6 +1249,126 @@ p {
   gap: 7px;
 }
 
+.deduction-card {
+  border-color: #eacdc4;
+  background:
+    linear-gradient(145deg, rgba(255, 253, 248, 0.98), rgba(253, 243, 238, 0.94));
+}
+
+.deduction-icon {
+  background: var(--coral-soft);
+}
+
+.deduction-points {
+  color: var(--danger) !important;
+  font-weight: 700;
+}
+
+.active-deductions {
+  display: grid;
+  gap: 10px;
+}
+
+.active-deductions.with-separator {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed #e6d3c8;
+}
+
+.deduction-rule-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid #eadfd5;
+  border-radius: 13px;
+  background: #fffefa;
+}
+
+.deduction-rule-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.deduction-rule-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.deduction-rule-title strong {
+  font-size: 13px;
+}
+
+.deduction-rule-title > span:not(.status-tag) {
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.warning-track {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-bottom: 7px;
+}
+
+.warning-track i {
+  display: block;
+  width: 18px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--paper-deep);
+}
+
+.warning-track i.used {
+  background: var(--coral);
+}
+
+.warning-track small {
+  color: var(--ink-soft);
+  font-size: 9px;
+  margin-left: 3px;
+}
+
+.deduction-latest {
+  margin: 3px 0 0;
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.deduction-manage-list {
+  display: grid;
+  gap: 8px;
+}
+
+.deduction-manage-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 12px 0;
+  border-bottom: 1px dashed #ece2d3;
+}
+
+.deduction-manage-row:last-child {
+  border-bottom: 0;
+}
+
+.deduction-manage-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.deduction-manage-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
 .workflow-note {
   display: flex;
   gap: 12px;
@@ -2756,6 +2876,16 @@ p {
 
   .inbox-item {
     flex-wrap: wrap;
+  }
+
+  .deduction-manage-row,
+  .deduction-rule-row {
+    flex-wrap: wrap;
+  }
+
+  .deduction-manage-actions {
+    width: 100%;
+    justify-content: flex-end;
   }
 
   .inbox-action {

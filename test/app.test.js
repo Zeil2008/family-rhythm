@@ -373,6 +373,86 @@ test("reward redemption reserves points and parent approval finalizes it", async
   assert.equal(family.payload.members.find((member) => member.id === childId).points, 2);
 });
 
+test("deduction rules require child acceptance and deduct only after all warnings", async () => {
+  const created = await request("/api/deduction-rules", {
+    method: "POST",
+    cookie: parentCookie,
+    body: {
+      memberId: childId,
+      title: "未经同意拿家人的物品",
+      description: "先提醒，警告用完后按约定扣分",
+      points: 1,
+      warningLimit: 3,
+    },
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.payload.rule.status, "pending_acceptance");
+  assert.equal(created.payload.rule.warningLimit, 3);
+
+  const childEdit = await request(`/api/deduction-rules/${created.payload.rule.id}`, {
+    method: "PATCH",
+    cookie: childCookie,
+    body: { points: 99 },
+  });
+  assert.equal(childEdit.response.status, 403);
+
+  const beforeAcceptance = await request(
+    `/api/deduction-rules/${created.payload.rule.id}/record`,
+    { method: "POST", cookie: parentCookie, body: { note: "提前记录" } }
+  );
+  assert.equal(beforeAcceptance.response.status, 409);
+
+  const dashboard = await request("/api/dashboard", { cookie: childCookie });
+  assert.ok(
+    dashboard.payload.deductionInbox.some(
+      (rule) => rule.id === created.payload.rule.id
+    )
+  );
+
+  const accepted = await request(
+    `/api/deduction-rules/${created.payload.rule.id}/accept`,
+    { method: "POST", cookie: childCookie }
+  );
+  assert.equal(accepted.response.status, 200);
+  assert.equal(accepted.payload.rule.status, "active");
+
+  for (let index = 1; index <= 3; index += 1) {
+    const warning = await request(
+      `/api/deduction-rules/${created.payload.rule.id}/record`,
+      { method: "POST", cookie: parentCookie, body: { note: `第 ${index} 次` } }
+    );
+    assert.equal(warning.response.status, 200);
+    assert.equal(warning.payload.result, "warning");
+    assert.equal(warning.payload.warningAfter, index);
+    assert.equal(warning.payload.deducted, 0);
+  }
+
+  const beforeDeduction = await request("/api/family", { cookie: childCookie });
+  assert.equal(
+    beforeDeduction.payload.members.find((member) => member.id === childId).points,
+    2
+  );
+
+  const deduction = await request(
+    `/api/deduction-rules/${created.payload.rule.id}/record`,
+    { method: "POST", cookie: parentCookie, body: { note: "第四次行为" } }
+  );
+  assert.equal(deduction.response.status, 200);
+  assert.equal(deduction.payload.result, "deduction");
+  assert.equal(deduction.payload.deducted, 1);
+  assert.equal(deduction.payload.balanceAfter, 1);
+  assert.equal(deduction.payload.rule.events.length, 4);
+
+  const reset = await request(
+    `/api/deduction-rules/${created.payload.rule.id}/reset`,
+    { method: "POST", cookie: parentCookie, body: { note: "开启新一轮" } }
+  );
+  assert.equal(reset.response.status, 200);
+  assert.equal(reset.payload.result, "reset");
+  assert.equal(reset.payload.rule.warningsUsed, 0);
+  assert.equal(reset.payload.rule.events[0].type, "reset");
+});
+
 test("public app shell is served", async () => {
   const response = await fetch(`${baseUrl}/`);
   assert.equal(response.status, 200);

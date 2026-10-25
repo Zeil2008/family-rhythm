@@ -276,6 +276,64 @@ function getTaskRow(db, familyId, taskId) {
   `).get(taskId, familyId);
 }
 
+function getDeductionRules(db, familyId, memberId = null, { activeOnly = false } = {}) {
+  return db.prepare(`
+    SELECT d.*, m.name AS member_name, m.color AS member_color,
+           m.avatar_path AS member_avatar_path,
+           creator.name AS creator_name
+    FROM deduction_rules d
+    JOIN members m ON m.id = d.member_id
+    LEFT JOIN members creator ON creator.id = d.created_by
+    WHERE d.family_id = ? AND d.archived = 0
+      ${memberId ? "AND d.member_id = ?" : ""}
+      ${activeOnly ? "AND d.status = 'active'" : ""}
+    ORDER BY d.status = 'pending_acceptance' DESC, d.id DESC
+  `).all(familyId, ...(memberId ? [memberId] : []));
+}
+
+function getDeductionEvents(db, ruleId, limit = 20) {
+  return db.prepare(`
+    SELECT e.*, actor.name AS actor_name
+    FROM deduction_events e
+    LEFT JOIN members actor ON actor.id = e.created_by
+    WHERE e.rule_id = ?
+    ORDER BY e.id DESC LIMIT ?
+  `).all(ruleId, limit);
+}
+
+function deductionRuleJson(rule, events = []) {
+  return {
+    id: Number(rule.id),
+    memberId: Number(rule.member_id),
+    memberName: rule.member_name,
+    memberColor: rule.member_color,
+    memberAvatarUrl: rule.member_avatar_path
+      ? `/api/members/${rule.member_id}/avatar?v=${encodeURIComponent(path.basename(rule.member_avatar_path))}`
+      : null,
+    title: rule.title,
+    description: rule.description,
+    points: Number(rule.points),
+    warningLimit: Number(rule.warning_limit),
+    warningsUsed: Number(rule.warnings_used),
+    remainingWarnings: Math.max(0, Number(rule.warning_limit) - Number(rule.warnings_used)),
+    status: rule.status,
+    acceptedAt: rule.accepted_at,
+    createdAt: rule.created_at,
+    updatedAt: rule.updated_at,
+    creatorName: rule.creator_name || "",
+    events: events.map((event) => ({
+      id: Number(event.id),
+      type: event.event_type,
+      pointsDelta: Number(event.points_delta),
+      warningAfter: Number(event.warning_after),
+      balanceAfter: Number(event.balance_after),
+      note: event.note,
+      actorName: event.actor_name || "",
+      createdAt: event.created_at,
+    })),
+  };
+}
+
 function occurrenceRows(db, familyId, start, end, memberId = null) {
   const dates = dateRange(start, end, 94);
   if (dates.length === 0) return [];
@@ -697,6 +755,25 @@ function createApplication({
             WHERE family_id = ? AND workflow_status = 'pending_acceptance' AND archived = 0
           `).get(family.id).count)
         : taskInbox.filter((task) => task.workflowStatus === "pending_acceptance").length;
+      const deductionRules = getDeductionRules(
+        db,
+        family.id,
+        user.role === "child" ? user.id : null
+      ).map((rule) =>
+        deductionRuleJson(rule, getDeductionEvents(db, rule.id, 5))
+      );
+      const deductionInbox = user.role === "child"
+        ? deductionRules.filter((rule) => rule.status === "pending_acceptance")
+        : [];
+      const activeDeductionRules = user.role === "child"
+        ? deductionRules.filter((rule) => rule.status === "active")
+        : [];
+      const pendingDeductionAgreements = user.role === "child"
+        ? deductionInbox.length
+        : Number(db.prepare(`
+            SELECT COUNT(*) AS count FROM deduction_rules
+            WHERE family_id = ? AND status = 'pending_acceptance' AND archived = 0
+          `).get(family.id).count);
       const recentPoints = db.prepare(`
         SELECT id, delta, balance_after, reason, type, created_at
         FROM point_transactions WHERE member_id = ?
@@ -712,6 +789,8 @@ function createApplication({
           .map((row) => ({ ...row, overdue: row.status === "todo" && date < today })),
         familyTasks: todayRows,
         taskInbox,
+        deductionInbox,
+        deductionRules: activeDeductionRules,
         members: members.map((member) => ({
           ...memberDailyStats(member, todayRows),
           streak: calculateStreak(member.id, start, today, rows),
@@ -721,6 +800,7 @@ function createApplication({
         pendingRedemptions,
         pendingTaskReviews,
         pendingAgreements,
+        pendingDeductionAgreements,
         recentPoints: recentPoints.map((item) => ({
           ...item,
           id: Number(item.id),
@@ -905,6 +985,231 @@ function createApplication({
       );
       return sendJson(res, 200, {
         task: taskJson(getTaskRow(db, family.id, task.id)),
+      });
+    }
+
+    if (method === "GET" && pathname === "/api/deduction-rules") {
+      const rules = getDeductionRules(
+        db,
+        family.id,
+        user.role === "child" ? user.id : null
+      ).map((rule) => deductionRuleJson(rule, getDeductionEvents(db, rule.id)));
+      return sendJson(res, 200, { rules });
+    }
+
+    if (method === "POST" && pathname === "/api/deduction-rules") {
+      ensureParent(user);
+      const body = await readJson(req);
+      const member = memberInFamily(db, Number(body.memberId), family.id);
+      if (!member.active) failure("该成员已停用");
+      if (member.role !== "child") failure("扣分项只能分配给家庭中的孩子");
+      const title = cleanText(body.title, "扣分项名称", { required: true, max: 80 });
+      const description = cleanText(body.description, "说明", { max: 500 });
+      const points = parseInteger(body.points, "扣分分值", 1, 1000);
+      const warningLimit = parseInteger(body.warningLimit ?? 3, "警告次数", 0, 99);
+      const now = nowIso();
+      const id = Number(db.prepare(`
+        INSERT INTO deduction_rules
+          (family_id, member_id, title, description, points, warning_limit,
+           warnings_used, status, created_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 0, 'pending_acceptance', ?, ?, ?)
+      `).run(
+        family.id,
+        member.id,
+        title,
+        description,
+        points,
+        warningLimit,
+        user.id,
+        now,
+        now
+      ).lastInsertRowid);
+      const rule = getDeductionRules(db, family.id).find((item) => item.id === id);
+      return sendJson(res, 201, {
+        rule: deductionRuleJson(rule, getDeductionEvents(db, rule.id)),
+      });
+    }
+
+    const deductionActionMatch = pathname.match(
+      /^\/api\/deduction-rules\/(\d+)\/(accept|record|reset)$/
+    );
+    if (deductionActionMatch && method === "POST") {
+      const ruleId = Number(deductionActionMatch[1]);
+      const action = deductionActionMatch[2];
+      const rule = getDeductionRules(db, family.id)
+        .find((item) => item.id === ruleId);
+      if (!rule) failure("扣分项不存在", 404);
+
+      if (action === "accept") {
+        if (user.role !== "child" || rule.member_id !== user.id) {
+          failure("只有被约定的孩子可以接受扣分项", 403);
+        }
+        if (rule.status !== "pending_acceptance") failure("这个扣分项已经接受过了");
+        db.prepare(`
+          UPDATE deduction_rules SET status = 'active', accepted_at = ?, updated_at = ?
+          WHERE id = ?
+        `).run(nowIso(), nowIso(), rule.id);
+        return sendJson(res, 200, {
+          rule: deductionRuleJson(
+            getDeductionRules(db, family.id).find((item) => item.id === rule.id),
+            getDeductionEvents(db, rule.id)
+          ),
+        });
+      }
+
+      ensureParent(user);
+      if (rule.status !== "active") failure("孩子接受扣分项后才能记录", 409);
+      const body = await readJson(req);
+      if (action === "reset") {
+        withTransaction(db, () => {
+          db.prepare(`
+            UPDATE deduction_rules
+            SET warnings_used = 0, updated_at = ?
+            WHERE id = ?
+          `).run(nowIso(), rule.id);
+          const member = memberInFamily(db, rule.member_id, family.id);
+          db.prepare(`
+            INSERT INTO deduction_events
+              (rule_id, member_id, event_type, points_delta, warning_after,
+               balance_after, note, created_by, created_at)
+            VALUES (?, ?, 'reset', 0, 0, ?, ?, ?, ?)
+          `).run(
+            rule.id,
+            rule.member_id,
+            member.points,
+            cleanText(body.note || "家长开启新一轮警告", "备注", { max: 200 }),
+            user.id,
+            nowIso()
+          );
+        });
+        return sendJson(res, 200, {
+          result: "reset",
+          rule: deductionRuleJson(
+            getDeductionRules(db, family.id).find((item) => item.id === rule.id),
+            getDeductionEvents(db, rule.id)
+          ),
+        });
+      }
+
+      const note = cleanText(body.note, "本次记录说明", { max: 200 });
+      const result = withTransaction(db, () => {
+        const freshRule = db.prepare(`
+          SELECT * FROM deduction_rules
+          WHERE id = ? AND family_id = ? AND archived = 0
+        `).get(rule.id, family.id);
+        if (!freshRule) failure("扣分项不存在", 404);
+        if (freshRule.warnings_used < freshRule.warning_limit) {
+          const warningAfter = Number(freshRule.warnings_used) + 1;
+          db.prepare(`
+            UPDATE deduction_rules SET warnings_used = ?, updated_at = ? WHERE id = ?
+          `).run(warningAfter, nowIso(), freshRule.id);
+          const member = memberInFamily(db, freshRule.member_id, family.id);
+          const eventId = Number(db.prepare(`
+            INSERT INTO deduction_events
+              (rule_id, member_id, event_type, points_delta, warning_after,
+               balance_after, note, created_by, created_at)
+            VALUES (?, ?, 'warning', 0, ?, ?, ?, ?, ?)
+          `).run(
+            freshRule.id,
+            freshRule.member_id,
+            warningAfter,
+            member.points,
+            note,
+            user.id,
+            nowIso()
+          ).lastInsertRowid);
+          return {
+            result: "warning",
+            eventId,
+            warningAfter,
+            remainingWarnings: Math.max(0, Number(freshRule.warning_limit) - warningAfter),
+            deducted: 0,
+          };
+        }
+
+        const member = memberInFamily(db, freshRule.member_id, family.id);
+        const deducted = Math.min(Number(freshRule.points), Number(member.points));
+        if (deducted > 0) {
+          addPointTransaction(db, member, -deducted, {
+            reason: `扣分项：${freshRule.title}`,
+            type: "deduction",
+            referenceType: "deduction_rule",
+            referenceId: freshRule.id,
+            createdBy: user.id,
+          });
+        }
+        const balanceAfter = Number(member.points) - deducted;
+        const eventId = Number(db.prepare(`
+          INSERT INTO deduction_events
+            (rule_id, member_id, event_type, points_delta, warning_after,
+             balance_after, note, created_by, created_at)
+          VALUES (?, ?, 'deduction', ?, ?, ?, ?, ?, ?)
+        `).run(
+          freshRule.id,
+          freshRule.member_id,
+          -deducted,
+          freshRule.warnings_used,
+          balanceAfter,
+          note,
+          user.id,
+          nowIso()
+        ).lastInsertRowid);
+        return {
+          result: "deduction",
+          eventId,
+          warningAfter: Number(freshRule.warnings_used),
+          remainingWarnings: 0,
+          deducted,
+          balanceAfter,
+        };
+      });
+      return sendJson(res, 200, {
+        ...result,
+        rule: deductionRuleJson(
+          getDeductionRules(db, family.id).find((item) => item.id === rule.id),
+          getDeductionEvents(db, rule.id)
+        ),
+      });
+    }
+
+    const deductionRuleMatch = pathname.match(/^\/api\/deduction-rules\/(\d+)$/);
+    if (deductionRuleMatch && (method === "PATCH" || method === "DELETE")) {
+      ensureParent(user);
+      const ruleId = Number(deductionRuleMatch[1]);
+      const rule = getDeductionRules(db, family.id)
+        .find((item) => item.id === ruleId);
+      if (!rule) failure("扣分项不存在", 404);
+      if (method === "DELETE") {
+        db.prepare("UPDATE deduction_rules SET archived = 1 WHERE id = ?").run(rule.id);
+        return sendJson(res, 200, { ok: true });
+      }
+      const body = await readJson(req);
+      const title = cleanText(body.title ?? rule.title, "扣分项名称", {
+        required: true,
+        max: 80,
+      });
+      const description = cleanText(body.description ?? rule.description, "说明", {
+        max: 500,
+      });
+      const points = parseInteger(body.points ?? rule.points, "扣分分值", 1, 1000);
+      const warningLimit = parseInteger(
+        body.warningLimit ?? rule.warning_limit,
+        "警告次数",
+        0,
+        99
+      );
+      db.prepare(`
+        UPDATE deduction_rules SET
+          title = ?, description = ?, points = ?, warning_limit = ?,
+          warnings_used = 0, status = 'pending_acceptance', accepted_at = NULL,
+          updated_at = ?
+        WHERE id = ?
+      `).run(title, description, points, warningLimit, nowIso(), rule.id);
+      return sendJson(res, 200, {
+        rule: deductionRuleJson(
+          getDeductionRules(db, family.id).find((item) => item.id === rule.id),
+          getDeductionEvents(db, rule.id)
+        ),
       });
     }
 

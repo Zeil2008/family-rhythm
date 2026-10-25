@@ -80,6 +80,7 @@ const state = {
   scheduleRows: [],
   familyData: null,
   manageTasks: [],
+  deductionRules: [],
   rewards: [],
   dashboard: null,
 };
@@ -633,6 +634,65 @@ function taskInboxSection(tasks) {
   `;
 }
 
+function deductionRulesSection(pendingRules, activeRules) {
+  if (!pendingRules.length && !activeRules.length) return "";
+  return `
+    <section class="card section-card deduction-card">
+      <div class="section-head">
+        <div><h2>行为扣分约定</h2><p>先警告、后扣分；所有记录都会保留</p></div>
+        ${pendingRules.length ? `<span class="status-tag pending">${pendingRules.length} 项待接受</span>` : ""}
+      </div>
+      ${
+        pendingRules.length
+          ? `<div class="inbox-list">
+              ${pendingRules.map((rule) => `
+                <article class="inbox-item">
+                  <span class="task-icon deduction-icon">⚠️</span>
+                  <div class="inbox-main">
+                    <div class="task-title">${escapeHtml(rule.title)}</div>
+                    <div class="task-detail">
+                      <span>${rule.warningLimit} 次警告</span>
+                      <span class="deduction-points">警告用完后每次 -${rule.points} 分</span>
+                    </div>
+                    ${rule.description ? `<p class="inbox-note">${escapeHtml(rule.description)}</p>` : ""}
+                  </div>
+                  <div class="inbox-action">
+                    <span class="status-tag pending">等待接受</span>
+                    <button class="btn btn-sm btn-primary" data-action="accept-deduction" data-rule-id="${rule.id}">接受扣分约定</button>
+                  </div>
+                </article>
+              `).join("")}
+            </div>`
+          : ""
+      }
+      ${
+        activeRules.length
+          ? `<div class="active-deductions ${pendingRules.length ? "with-separator" : ""}">
+              ${activeRules.map((rule) => {
+                const used = Math.min(rule.warningsUsed, rule.warningLimit);
+                const dots = Math.max(0, Math.min(8, rule.warningLimit));
+                const latest = rule.events?.[0];
+                return `
+                  <article class="deduction-rule-row">
+                    <div class="deduction-rule-main">
+                      <div class="deduction-rule-title"><strong>${escapeHtml(rule.title)}</strong><span>每次 -${rule.points} 分</span></div>
+                      <div class="warning-track">
+                        ${Array.from({ length: dots }, (_, index) => `<i class="${index < used ? "used" : ""}"></i>`).join("")}
+                        <small>已用 ${used}/${rule.warningLimit} 次警告</small>
+                      </div>
+                      ${latest ? `<p class="deduction-latest">${latest.type === "deduction" ? `最近扣分 ${Math.abs(latest.pointsDelta)} 分` : latest.type === "reset" ? "家长已开启新一轮警告" : `最近记录第 ${latest.warningAfter} 次警告`}${latest.note ? ` · ${escapeHtml(latest.note)}` : ""}</p>` : ""}
+                    </div>
+                    <span class="status-tag ${used >= rule.warningLimit ? "rejected" : "pending"}">${used >= rule.warningLimit ? "警告已用完" : `余 ${rule.warningLimit - used} 次`}</span>
+                  </article>
+                `;
+              }).join("")}
+            </div>`
+          : ""
+      }
+    </section>
+  `;
+}
+
 async function renderToday(content) {
   const dashboard = await api(`/api/dashboard?date=${state.today}`);
   state.dashboard = dashboard;
@@ -650,9 +710,11 @@ async function renderToday(content) {
   };
   const pendingCode = dashboard.user.role === "parent" ? dashboard.reviewCount : 0;
   const taskInbox = dashboard.taskInbox || [];
+  const deductionInbox = dashboard.deductionInbox || [];
+  const deductionRules = dashboard.deductionRules || [];
   const pendingAgreements = dashboard.pendingAgreements || 0;
   if (dashboard.user.role === "child") {
-    state.reviewCount = taskInbox.length;
+    state.reviewCount = taskInbox.length + deductionInbox.length;
   }
   const allowComplete = dashboard.user.role !== "parent";
   const taskHeading =
@@ -680,6 +742,7 @@ async function renderToday(content) {
               <span class="hero-chip">${ICONS.star}${dashboard.user.points} 积分</span>
               <span class="hero-chip">${ICONS.check}${dashboard.user.role === "parent" ? "今日完成率 " + progress + "%" : mine.streak + " 天连续达标"}</span>
               ${pendingAgreements ? `<span class="hero-chip">🤝${pendingAgreements} 份约定待接受</span>` : ""}
+              ${dashboard.pendingDeductionAgreements ? `<span class="hero-chip">⚠️${dashboard.pendingDeductionAgreements} 项扣分约定待接受</span>` : ""}
             </div>
           </div>
           <div class="progress-orb" style="--progress:${progress}">
@@ -688,6 +751,7 @@ async function renderToday(content) {
         </section>
 
         ${taskInboxSection(taskInbox)}
+        ${deductionRulesSection(deductionInbox, deductionRules)}
 
         <section class="card section-card">
           <div class="section-head">
@@ -1108,16 +1172,71 @@ function completionRow(item) {
   `;
 }
 
+function deductionManageList(rules) {
+  if (!rules.length) {
+    return `
+      <div class="empty-state">
+        <div class="empty-emoji">⚠️</div>
+        <strong>还没有扣分约定</strong>
+        <p>先通过警告帮助孩子认识边界，再约定需要承担的积分后果。</p>
+        <button class="btn btn-primary btn-sm" data-action="new-deduction">新建扣分项</button>
+      </div>
+    `;
+  }
+  return `<div class="deduction-manage-list">
+    ${rules.map((rule) => {
+      const pending = rule.status === "pending_acceptance";
+      const used = Math.min(rule.warningsUsed, rule.warningLimit);
+      const dots = Math.max(0, Math.min(8, rule.warningLimit));
+      const latest = rule.events?.[0];
+      return `
+        <article class="deduction-manage-row">
+          ${miniAvatar({
+            avatarUrl: rule.memberAvatarUrl,
+            name: rule.memberName,
+            color: rule.memberColor,
+          })}
+          <div class="deduction-manage-main">
+            <div class="deduction-rule-title">
+              <strong>${escapeHtml(rule.title)}</strong>
+              <span class="status-tag ${pending ? "pending" : "approved"}">${pending ? "等待孩子接受" : "已生效"}</span>
+            </div>
+            <div class="task-detail">
+              <span>${escapeHtml(rule.memberName)}</span>
+              <span>${rule.warningLimit} 次警告</span>
+              <span class="deduction-points">用完后每次 -${rule.points} 分</span>
+            </div>
+            ${
+              pending
+                ? `<p class="deduction-latest">孩子接受前不能记录或扣分</p>`
+                : `<div class="warning-track">${Array.from({ length: dots }, (_, index) => `<i class="${index < used ? "used" : ""}"></i>`).join("")}<small>已用 ${used}/${rule.warningLimit} 次警告</small></div>`
+            }
+            ${latest ? `<p class="deduction-latest">${latest.type === "deduction" ? `上次扣除 ${Math.abs(latest.pointsDelta)} 分` : latest.type === "reset" ? "已开启新一轮警告" : `上次记录第 ${latest.warningAfter} 次警告`}${latest.note ? ` · ${escapeHtml(latest.note)}` : ""}</p>` : ""}
+          </div>
+          <div class="deduction-manage-actions">
+            ${!pending ? `<button class="btn btn-sm ${used >= rule.warningLimit ? "btn-danger-soft" : "btn-soft"}" data-action="record-deduction" data-rule-id="${rule.id}">${used >= rule.warningLimit ? "执行扣分" : "记录一次"}</button>` : ""}
+            <button class="icon-btn" data-action="edit-deduction" data-rule-id="${rule.id}" aria-label="编辑扣分项">${ICONS.edit}</button>
+            ${!pending ? `<button class="icon-btn" data-action="reset-deduction" data-rule-id="${rule.id}" aria-label="重置警告">↻</button>` : ""}
+            <button class="icon-btn" data-action="delete-deduction" data-rule-id="${rule.id}" aria-label="删除扣分项">${ICONS.trash}</button>
+          </div>
+        </article>
+      `;
+    }).join("")}
+  </div>`;
+}
+
 async function renderManage(content) {
   if (state.user.role !== "parent") return navigate("today");
-  const [tasksData, completionsData, redemptionsData, familyData, reports] = await Promise.all([
+  const [tasksData, deductionData, completionsData, redemptionsData, familyData, reports] = await Promise.all([
     api("/api/tasks"),
+    api("/api/deduction-rules"),
     api("/api/completions?status=pending"),
     api("/api/redemptions?status=pending"),
     api("/api/family"),
     api("/api/reports?days=7"),
   ]);
   state.manageTasks = tasksData.tasks;
+  state.deductionRules = deductionData.rules;
   state.familyData = familyData;
   state.user = familyData.user;
   const pendingCompletions = completionsData.completions;
@@ -1248,6 +1367,13 @@ async function renderManage(content) {
                   }).join("")}</div>`
                 : `<div class="empty-state"><div class="empty-emoji">🗓️</div><strong>还没有日程模板</strong><p>从每天都能完成的一件小事开始。</p><button class="btn btn-primary btn-sm" data-action="new-task">新建约定</button></div>`
             }
+          </section>
+          <section class="card section-card">
+            <div class="section-head">
+              <div><h2>扣分约定</h2><p>每个扣分项先警告，警告用完后按约定扣分</p></div>
+              <button class="btn btn-primary btn-sm" data-action="new-deduction">${ICONS.plus}新建扣分项</button>
+            </div>
+            ${deductionManageList(state.deductionRules)}
           </section>
         </div>
 
@@ -1492,6 +1618,66 @@ async function openTaskModal(task = null) {
                 ? "保存并重新确认"
                 : "发起家庭约定"
           }</button>
+          <button class="btn btn-secondary btn-lg" type="button" data-action="close-modal">取消</button>
+        </div>
+      </form>
+    `
+  );
+}
+
+async function openDeductionModal(rule = null) {
+  const familyData = await ensureFamilyData();
+  const children = familyData.members.filter(
+    (member) => member.active && member.role === "child"
+  );
+  if (!children.length) return toast("请先添加一位孩子成员", "error");
+  const memberId = rule?.memberId || children[0].id;
+  openModal(
+    rule ? "修改扣分项" : "新建扣分项",
+    "孩子接受后生效；修改内容后需要孩子重新接受",
+    `
+      <form class="form-stack" data-form="deduction" data-rule-id="${rule?.id || ""}">
+        <div class="workflow-note">
+          <span class="workflow-icon">⚠️</span>
+          <div>
+            <strong>先提醒，再承担约定后果</strong>
+            <p>每次记录先消耗一次警告。警告次数用完后，之后每次记录才会按设置扣除积分。</p>
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="deduction-title">扣分项名称</label>
+            <input class="input" id="deduction-title" name="title" maxlength="80" value="${escapeHtml(rule?.title || "")}" placeholder="比如：未经同意拿家人的物品" required autofocus>
+          </div>
+          <div class="field">
+            <label for="deduction-member">约定成员</label>
+            ${
+              rule
+                ? `<div class="locked-member" style="min-height:45px">${avatar({ name: rule.memberName, avatarUrl: rule.memberAvatarUrl, color: rule.memberColor })}<div><strong>${escapeHtml(rule.memberName)}</strong><small>扣分项归属成员</small></div></div>`
+                : `<select class="select" id="deduction-member" name="memberId" required>
+                    ${children.map((child) => `<option value="${child.id}" ${child.id === memberId ? "selected" : ""}>${escapeHtml(child.name)}</option>`).join("")}
+                  </select>`
+            }
+          </div>
+        </div>
+        <div class="field">
+          <label for="deduction-description">具体说明 <span class="field-hint">（孩子需要理解什么行为会触发）</span></label>
+          <textarea class="textarea" id="deduction-description" name="description" maxlength="500" placeholder="例如：拿别人的东西前先征得同意；第一次提醒，之后按约定处理。">${escapeHtml(rule?.description || "")}</textarea>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="deduction-warning-limit">警告次数</label>
+            <input class="input" id="deduction-warning-limit" name="warningLimit" type="number" min="0" max="99" step="1" value="${rule?.warningLimit ?? 3}" required>
+            <span class="field-hint">默认 3 次；填 0 表示第一次记录就扣分。</span>
+          </div>
+          <div class="field">
+            <label for="deduction-points">警告用完后每次扣分</label>
+            <input class="input" id="deduction-points" name="points" type="number" min="1" max="1000" step="1" value="${rule?.points ?? 2}" required>
+          </div>
+        </div>
+        <p class="form-error" data-form-error></p>
+        <div class="form-actions">
+          <button class="btn btn-primary btn-lg" type="submit">${rule ? "保存并重新确认" : "发起扣分约定"}</button>
           <button class="btn btn-secondary btn-lg" type="button" data-action="close-modal">取消</button>
         </div>
       </form>
@@ -1839,6 +2025,26 @@ async function handleSubmit(event) {
       return;
     }
 
+    if (kind === "deduction") {
+      const ruleId = form.dataset.ruleId;
+      const data = new FormData(form);
+      const body = {
+        title: data.get("title"),
+        description: data.get("description"),
+        points: Number(data.get("points")),
+        warningLimit: Number(data.get("warningLimit")),
+      };
+      if (!ruleId) body.memberId = Number(data.get("memberId"));
+      await api(ruleId ? `/api/deduction-rules/${ruleId}` : "/api/deduction-rules", {
+        method: ruleId ? "PATCH" : "POST",
+        body,
+      });
+      closeModal();
+      toast(ruleId ? "扣分项已修改，等待孩子重新接受" : "扣分约定已发起，等待孩子接受");
+      await navigate("manage");
+      return;
+    }
+
     if (kind === "member") {
       const memberId = form.dataset.memberId;
       const data = new FormData(form);
@@ -1979,6 +2185,48 @@ async function handleAction(event) {
       await navigate(target.dataset.view);
     } else if (action === "new-task") {
       await openTaskModal();
+    } else if (action === "new-deduction") {
+      await openDeductionModal();
+    } else if (action === "edit-deduction") {
+      const rule = state.deductionRules.find(
+        (item) => item.id === Number(target.dataset.ruleId)
+      );
+      if (rule) await openDeductionModal(rule);
+    } else if (action === "delete-deduction") {
+      if (!window.confirm("删除后这项扣分约定不再显示，历史记录仍会保留。确定删除吗？")) return;
+      await api(`/api/deduction-rules/${target.dataset.ruleId}`, { method: "DELETE" });
+      toast("扣分项已删除");
+      await navigate("manage");
+    } else if (action === "accept-deduction") {
+      if (!window.confirm("接受这份扣分约定后，家长可按约定记录警告和扣分。确定接受吗？")) return;
+      await api(`/api/deduction-rules/${target.dataset.ruleId}/accept`, {
+        method: "POST",
+      });
+      toast("已接受扣分约定");
+      await navigate("today");
+    } else if (action === "record-deduction") {
+      const note = window.prompt("记录本次行为说明（可留空）：", "");
+      if (note === null) return;
+      const result = await api(
+        `/api/deduction-rules/${target.dataset.ruleId}/record`,
+        { method: "POST", body: { note } }
+      );
+      if (result.result === "warning") {
+        toast(`已记录警告，本项还剩 ${result.remainingWarnings} 次警告`);
+      } else if (result.deducted > 0) {
+        toast(`警告已用完，已扣除 ${result.deducted} 积分`);
+      } else {
+        toast("警告已用完，但当前没有可扣积分");
+      }
+      await navigate("manage");
+    } else if (action === "reset-deduction") {
+      if (!window.confirm("将警告次数重置为 0，并开启新一轮提醒吗？")) return;
+      await api(`/api/deduction-rules/${target.dataset.ruleId}/reset`, {
+        method: "POST",
+        body: {},
+      });
+      toast("已开启新一轮警告");
+      await navigate("manage");
     } else if (action === "complete-task") {
       const occurrence = findOccurrence(target.dataset.taskId, target.dataset.date);
       if (occurrence) openCompletionModal(occurrence);

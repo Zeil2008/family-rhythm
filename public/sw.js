@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "family-rhythm-v5";
+const CACHE_NAME = "family-rhythm-v7";
 const STATIC_ASSETS = [
   "/",
   "/index.html",

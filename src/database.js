@@ -125,10 +125,45 @@ function openDatabase(dbPath) {
       note TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS deduction_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+      member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      points INTEGER NOT NULL CHECK (points > 0 AND points <= 1000),
+      warning_limit INTEGER NOT NULL DEFAULT 3 CHECK (warning_limit >= 0 AND warning_limit <= 99),
+      warnings_used INTEGER NOT NULL DEFAULT 0 CHECK (warnings_used >= 0),
+      status TEXT NOT NULL DEFAULT 'pending_acceptance'
+        CHECK (status IN ('pending_acceptance', 'active')),
+      accepted_at TEXT,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_by INTEGER NOT NULL REFERENCES members(id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS deduction_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_id INTEGER NOT NULL REFERENCES deduction_rules(id) ON DELETE CASCADE,
+      member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL CHECK (event_type IN ('warning', 'deduction', 'reset')),
+      points_delta INTEGER NOT NULL DEFAULT 0,
+      warning_after INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      created_by INTEGER NOT NULL REFERENCES members(id),
+      created_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_family_member ON tasks(family_id, member_id, archived);
     CREATE INDEX IF NOT EXISTS idx_completions_occurrence ON completions(occurrence_date, status);
     CREATE INDEX IF NOT EXISTS idx_points_member_date ON point_transactions(member_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_redemptions_member_status ON redemptions(member_id, status);
+    CREATE INDEX IF NOT EXISTS idx_deduction_rules_family
+      ON deduction_rules(family_id, member_id, archived, status);
+    CREATE INDEX IF NOT EXISTS idx_deduction_events_rule
+      ON deduction_events(rule_id, created_at);
   `);
 
   function addMissingColumn(table, column, definition) {

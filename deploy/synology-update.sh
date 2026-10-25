@@ -54,4 +54,4 @@ if command -v curl >/dev/null 2>&1; then
 fi
 
 echo
-echo "更新完成。请查看上方版本接口是否返回 1.2.1。"
+echo "更新完成。请查看上方版本接口是否返回 1.3.0。"

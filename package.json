@@ -1,0 +1,17 @@
+{
+  "name": "family-rhythm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A self-hosted family schedule and points system.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test",
+    "backup": "node scripts/backup.js",
+    "reset-pin": "node scripts/reset-pin.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

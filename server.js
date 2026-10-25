@@ -218,13 +218,41 @@ function getTasks(db, familyId, memberId = null, { activeOnly = false } = {}) {
     JOIN members m ON m.id = t.member_id
     LEFT JOIN members creator ON creator.id = t.created_by
     WHERE t.family_id = ? AND t.archived = 0
-    ${memberId ? "AND t.member_id = ?" : ""}
+    ${
+      memberId
+        ? "AND EXISTS (SELECT 1 FROM task_assignees ta0 WHERE ta0.task_id = t.id AND ta0.member_id = ?)"
+        : ""
+    }
     ${activeOnly ? "AND t.workflow_status = 'active'" : ""}
     ORDER BY t.due_time IS NULL, t.due_time, t.id
   `;
-  return memberId
+  const tasks = memberId
     ? db.prepare(sql).all(familyId, memberId)
     : db.prepare(sql).all(familyId);
+  return attachTaskAssignees(db, tasks);
+}
+
+function attachTaskAssignees(db, tasks) {
+  if (!tasks.length) return tasks;
+  const taskIds = tasks.map((task) => task.id);
+  const placeholders = taskIds.map(() => "?").join(",");
+  const assignments = db.prepare(`
+    SELECT ta.task_id, ta.member_id, ta.status, ta.accepted_at,
+           m.name, m.color, m.avatar_path
+    FROM task_assignees ta
+    JOIN members m ON m.id = ta.member_id
+    WHERE ta.task_id IN (${placeholders})
+    ORDER BY m.role = 'child', m.id
+  `).all(...taskIds);
+  const byTask = new Map();
+  for (const assignment of assignments) {
+    if (!byTask.has(assignment.task_id)) byTask.set(assignment.task_id, []);
+    byTask.get(assignment.task_id).push(assignment);
+  }
+  return tasks.map((task) => ({
+    ...task,
+    assignees: byTask.get(task.id) || [],
+  }));
 }
 
 function taskJson(task) {
@@ -234,15 +262,30 @@ function taskJson(task) {
   } catch {
     weekdays = [];
   }
+  const members = (task.assignees || []).map((member) => ({
+    id: Number(member.member_id),
+    name: member.name,
+    color: member.color,
+    avatarUrl: member.avatar_path
+      ? `/api/members/${member.member_id}/avatar?v=${encodeURIComponent(path.basename(member.avatar_path))}`
+      : null,
+    acceptanceStatus: member.status,
+    acceptedAt: member.accepted_at,
+  }));
+  const primary = members[0];
   return {
     id: Number(task.id),
-    memberId: Number(task.member_id),
-    memberName: task.member_name,
+    memberId: primary?.id || Number(task.member_id),
+    memberName: primary?.name || task.member_name,
     memberAvatar: task.member_avatar,
-    memberAvatarUrl: task.member_avatar_path
-      ? `/api/members/${task.member_id}/avatar?v=${encodeURIComponent(path.basename(task.member_avatar_path))}`
-      : null,
-    memberColor: task.member_color,
+    memberAvatarUrl:
+      primary?.avatarUrl ||
+      (task.member_avatar_path
+        ? `/api/members/${task.member_id}/avatar?v=${encodeURIComponent(path.basename(task.member_avatar_path))}`
+        : null),
+    memberColor: primary?.color || task.member_color,
+    memberIds: members.map((member) => member.id),
+    members,
     title: task.title,
     notes: task.notes,
     category: task.category,
@@ -265,7 +308,7 @@ function taskJson(task) {
 }
 
 function getTaskRow(db, familyId, taskId) {
-  return db.prepare(`
+  const task = db.prepare(`
     SELECT t.*, m.name AS member_name, m.avatar AS member_avatar,
            m.avatar_path AS member_avatar_path, m.color AS member_color,
            creator.name AS creator_name, creator.role AS creator_role
@@ -274,6 +317,7 @@ function getTaskRow(db, familyId, taskId) {
     LEFT JOIN members creator ON creator.id = t.created_by
     WHERE t.id = ? AND t.family_id = ? AND t.archived = 0
   `).get(taskId, familyId);
+  return task ? attachTaskAssignees(db, [task])[0] : null;
 }
 
 function getDeductionRules(db, familyId, memberId = null, { activeOnly = false } = {}) {
@@ -358,20 +402,32 @@ function occurrenceRows(db, familyId, start, end, memberId = null) {
   for (const date of dates) {
     for (const task of tasks) {
       if (!occursOn(task, date)) continue;
-      const completion = completionMap.get(`${task.id}:${task.member_id}:${date}`);
-      result.push({
-        ...taskJson(task),
-        taskId: Number(task.id),
-        date,
-        status: completion?.status || "todo",
-        completionId: completion ? Number(completion.id) : null,
-        completedAt: completion?.completed_at || null,
-        reviewedAt: completion?.reviewed_at || null,
-        reviewerName: completion?.reviewer_name || null,
-        reviewNote: completion?.review_note || "",
-        evidenceNote: completion?.evidence_note || "",
-        hasEvidence: Boolean(completion?.evidence_path),
-      });
+      const definition = taskJson(task);
+      for (const assignee of task.assignees.filter((item) => item.status === "active")) {
+        const completion = completionMap.get(
+          `${task.id}:${assignee.member_id}:${date}`
+        );
+        result.push({
+          ...definition,
+          taskId: Number(task.id),
+          memberId: Number(assignee.member_id),
+          memberName: assignee.name,
+          memberColor: assignee.color,
+          memberAvatar: "",
+          memberAvatarUrl: assignee.avatar_path
+            ? `/api/members/${assignee.member_id}/avatar?v=${encodeURIComponent(path.basename(assignee.avatar_path))}`
+            : null,
+          date,
+          status: completion?.status || "todo",
+          completionId: completion ? Number(completion.id) : null,
+          completedAt: completion?.completed_at || null,
+          reviewedAt: completion?.reviewed_at || null,
+          reviewerName: completion?.reviewer_name || null,
+          reviewNote: completion?.review_note || "",
+          evidenceNote: completion?.evidence_note || "",
+          hasEvidence: Boolean(completion?.evidence_path),
+        });
+      }
     }
   }
   return result.sort(
@@ -738,10 +794,15 @@ function createApplication({
       const taskInbox =
         user.role === "child"
           ? getTasks(db, family.id, user.id)
-              .filter((task) =>
-                ["pending_acceptance", "pending_approval", "rejected"].includes(task.workflow_status)
-              )
               .map(taskJson)
+              .filter((task) => {
+                const mine = task.members.find((member) => member.id === user.id);
+                if (!mine) return false;
+                if (task.taskType === "agreed") {
+                  return mine.acceptanceStatus === "pending_acceptance";
+                }
+                return ["pending_approval", "rejected"].includes(task.workflowStatus);
+              })
           : [];
       const pendingTaskReviews = user.role === "parent"
         ? Number(db.prepare(`
@@ -751,10 +812,16 @@ function createApplication({
         : 0;
       const pendingAgreements = user.role === "parent"
         ? Number(db.prepare(`
-            SELECT COUNT(*) AS count FROM tasks
-            WHERE family_id = ? AND workflow_status = 'pending_acceptance' AND archived = 0
+            SELECT COUNT(*) AS count
+            FROM task_assignees ta
+            JOIN tasks t ON t.id = ta.task_id
+            WHERE t.family_id = ? AND t.task_type = 'agreed' AND t.archived = 0
+              AND ta.status = 'pending_acceptance'
           `).get(family.id).count)
-        : taskInbox.filter((task) => task.workflowStatus === "pending_acceptance").length;
+        : taskInbox.filter((task) => {
+            const mine = task.members.find((member) => member.id === user.id);
+            return task.taskType === "agreed" && mine?.acceptanceStatus === "pending_acceptance";
+          }).length;
       const deductionRules = getDeductionRules(
         db,
         family.id,
@@ -833,47 +900,70 @@ function createApplication({
 
     if (method === "POST" && pathname === "/api/tasks") {
       const body = await readJson(req);
-      if (user.role === "child") body.memberId = user.id;
+      const requestedMemberIds = user.role === "child"
+        ? [user.id]
+        : [...new Set((Array.isArray(body.memberIds) ? body.memberIds : [body.memberId])
+            .map(Number)
+            .filter(Number.isInteger))];
+      if (requestedMemberIds.length === 0) failure("请至少选择一位家庭成员");
+      body.memberId = requestedMemberIds[0];
       const task = normalizeTaskPayload(body);
-      const member = memberInFamily(db, task.memberId, family.id);
-      if (!member.active) failure("该成员已停用");
-      if (user.role === "child" && member.id !== user.id) failure("不能为其他成员创建任务", 403);
+      const assignedMembers = requestedMemberIds.map((memberId) =>
+        memberInFamily(db, memberId, family.id)
+      );
+      if (assignedMembers.some((member) => !member.active)) failure("所选成员中有已停用成员");
+      if (user.role === "child" && assignedMembers.some((member) => member.id !== user.id)) {
+        failure("不能为其他成员创建任务", 403);
+      }
+      const includesChild = assignedMembers.some((member) => member.role === "child");
       const taskType = user.role === "parent" ? "agreed" : "custom";
-      const workflowStatus =
-        user.role === "child"
-          ? "pending_approval"
-          : member.role === "child"
-            ? "pending_acceptance"
-            : "active";
-      const requireApproval = member.role === "child" ? 1 : task.requireApproval;
-      const evidenceRequired = member.role === "child" ? 1 : task.evidenceRequired;
+      const workflowStatus = user.role === "child" ? "pending_approval" : "active";
+      const requireApproval = includesChild ? 1 : task.requireApproval;
+      const evidenceRequired = includesChild ? 1 : task.evidenceRequired;
       const acceptedAt = workflowStatus === "active" ? nowIso() : null;
-      const id = Number(db.prepare(`
-        INSERT INTO tasks
-          (family_id, member_id, title, notes, category, task_type, workflow_status,
-           points, due_time, start_date, end_date, recurrence, weekdays,
-           require_approval, evidence_required, created_by, accepted_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        family.id,
-        task.memberId,
-        task.title,
-        task.notes,
-        task.category,
-        taskType,
-        workflowStatus,
-        task.points,
-        task.dueTime,
-        task.startDate,
-        task.endDate,
-        task.recurrence,
-        task.weekdays,
-        requireApproval,
-        evidenceRequired,
-        user.id,
-        acceptedAt,
-        nowIso()
-      ).lastInsertRowid);
+      let id;
+      withTransaction(db, () => {
+        id = Number(db.prepare(`
+          INSERT INTO tasks
+            (family_id, member_id, title, notes, category, task_type, workflow_status,
+             points, due_time, start_date, end_date, recurrence, weekdays,
+             require_approval, evidence_required, created_by, accepted_at, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          family.id,
+          task.memberId,
+          task.title,
+          task.notes,
+          task.category,
+          taskType,
+          workflowStatus,
+          task.points,
+          task.dueTime,
+          task.startDate,
+          task.endDate,
+          task.recurrence,
+          task.weekdays,
+          requireApproval,
+          evidenceRequired,
+          user.id,
+          acceptedAt,
+          nowIso()
+        ).lastInsertRowid);
+        const insertAssignee = db.prepare(`
+          INSERT INTO task_assignees (task_id, member_id, status, accepted_at)
+          VALUES (?, ?, ?, ?)
+        `);
+        for (const member of assignedMembers) {
+          const assignmentActive =
+            user.role === "parent" && member.role === "parent";
+          insertAssignee.run(
+            id,
+            member.id,
+            assignmentActive ? "active" : "pending_acceptance",
+            assignmentActive ? nowIso() : null
+          );
+        }
+      });
       const created = getTaskRow(db, family.id, id);
       return sendJson(res, 201, { task: taskJson(created) });
     }
@@ -905,42 +995,63 @@ function createApplication({
         failure("孩子自建任务的内容由孩子调整，家长可在审核时退回并填写意见", 403);
       }
       const body = await readJson(req);
-      if (user.role === "child") body.memberId = user.id;
+      const requestedMemberIds = user.role === "child"
+        ? [user.id]
+        : [...new Set((Array.isArray(body.memberIds) ? body.memberIds : [body.memberId ?? current.member_id])
+            .map(Number)
+            .filter(Number.isInteger))];
+      if (requestedMemberIds.length === 0) failure("请至少选择一位家庭成员");
+      body.memberId = requestedMemberIds[0];
       const task = normalizeTaskPayload(body, current);
-      const member = memberInFamily(db, task.memberId, family.id);
-      if (!member.active) failure("该成员已停用");
-      const workflowStatus =
-        user.role === "child"
-          ? "pending_approval"
-          : member.role === "child"
-            ? "pending_acceptance"
-            : "active";
-      const acceptedAt = workflowStatus === "active" ? nowIso() : null;
-      db.prepare(`
-        UPDATE tasks SET
-          member_id = ?, title = ?, notes = ?, category = ?, points = ?,
-          due_time = ?, start_date = ?, end_date = ?, recurrence = ?,
-          weekdays = ?, require_approval = ?, evidence_required = ?,
-          workflow_status = ?, accepted_at = ?, review_note = '',
-          reviewed_by = NULL, reviewed_at = NULL
-        WHERE id = ?
-      `).run(
-        task.memberId,
-        task.title,
-        task.notes,
-        task.category,
-        task.points,
-        task.dueTime,
-        task.startDate,
-        task.endDate,
-        task.recurrence,
-        task.weekdays,
-        member.role === "child" ? 1 : task.requireApproval,
-        member.role === "child" ? 1 : task.evidenceRequired,
-        workflowStatus,
-        acceptedAt,
-        taskId
+      const assignedMembers = requestedMemberIds.map((memberId) =>
+        memberInFamily(db, memberId, family.id)
       );
+      if (assignedMembers.some((member) => !member.active)) failure("所选成员中有已停用成员");
+      const includesChild = assignedMembers.some((member) => member.role === "child");
+      const workflowStatus = user.role === "child" ? "pending_approval" : "active";
+      const acceptedAt = workflowStatus === "active" ? nowIso() : null;
+      withTransaction(db, () => {
+        db.prepare(`
+          UPDATE tasks SET
+            member_id = ?, title = ?, notes = ?, category = ?, points = ?,
+            due_time = ?, start_date = ?, end_date = ?, recurrence = ?,
+            weekdays = ?, require_approval = ?, evidence_required = ?,
+            workflow_status = ?, accepted_at = ?, review_note = '',
+            reviewed_by = NULL, reviewed_at = NULL
+          WHERE id = ?
+        `).run(
+          task.memberId,
+          task.title,
+          task.notes,
+          task.category,
+          task.points,
+          task.dueTime,
+          task.startDate,
+          task.endDate,
+          task.recurrence,
+          task.weekdays,
+          includesChild ? 1 : task.requireApproval,
+          includesChild ? 1 : task.evidenceRequired,
+          workflowStatus,
+          acceptedAt,
+          taskId
+        );
+        db.prepare("DELETE FROM task_assignees WHERE task_id = ?").run(taskId);
+        const insertAssignee = db.prepare(`
+          INSERT INTO task_assignees (task_id, member_id, status, accepted_at)
+          VALUES (?, ?, ?, ?)
+        `);
+        for (const member of assignedMembers) {
+          const assignmentActive =
+            user.role === "parent" && member.role === "parent";
+          insertAssignee.run(
+            taskId,
+            member.id,
+            assignmentActive ? "active" : "pending_acceptance",
+            assignmentActive ? nowIso() : null
+          );
+        }
+      });
       const updated = getTaskRow(db, family.id, taskId);
       return sendJson(res, 200, { task: taskJson(updated) });
     }
@@ -949,13 +1060,23 @@ function createApplication({
     if (taskAcceptMatch && method === "POST") {
       if (user.role !== "child") failure("只有孩子可以接受约定任务", 403);
       const task = getTaskRow(db, family.id, Number(taskAcceptMatch[1]));
-      if (!task || task.member_id !== user.id) failure("约定任务不存在", 404);
+      if (!task) failure("约定任务不存在", 404);
       if (task.task_type !== "agreed") failure("这不是约定任务");
-      if (task.workflow_status !== "pending_acceptance") failure("这份约定已经处理过了");
+      const assignment = task.assignees.find((member) => member.member_id === user.id);
+      if (!assignment) failure("约定任务不存在", 404);
+      if (assignment.status !== "pending_acceptance") failure("这份约定已经处理过了");
       db.prepare(`
-        UPDATE tasks SET workflow_status = 'active', accepted_at = ?, review_note = ''
-        WHERE id = ?
-      `).run(nowIso(), task.id);
+        UPDATE task_assignees SET status = 'active', accepted_at = ?
+        WHERE task_id = ? AND member_id = ?
+      `).run(nowIso(), task.id, user.id);
+      const remaining = db.prepare(`
+        SELECT COUNT(*) AS count FROM task_assignees
+        WHERE task_id = ? AND status = 'pending_acceptance'
+      `).get(task.id).count;
+      if (Number(remaining) === 0) {
+        db.prepare("UPDATE tasks SET accepted_at = ?, review_note = '' WHERE id = ?")
+          .run(nowIso(), task.id);
+      }
       return sendJson(res, 200, { task: taskJson(getTaskRow(db, family.id, task.id)) });
     }
 
@@ -981,6 +1102,14 @@ function createApplication({
         cleanText(body.note, "审核意见", { max: 300 }),
         user.id,
         nowIso(),
+        task.id
+      );
+      db.prepare(`
+        UPDATE task_assignees SET status = ?, accepted_at = ?
+        WHERE task_id = ?
+      `).run(
+        workflowStatus === "active" ? "active" : "pending_acceptance",
+        workflowStatus === "active" ? nowIso() : null,
         task.id
       );
       return sendJson(res, 200, {
@@ -1454,13 +1583,20 @@ function createApplication({
       if (!task) failure("日程不存在", 404);
       if (task.workflow_status !== "active") failure("任务尚未生效，暂时不能上报", 409);
       if (!occursOn(task, date)) failure("该日期没有这项日程");
-      if (user.role === "child" && task.member_id !== user.id) failure("不能操作其他成员的日程", 403);
+      const completionMemberId = user.role === "child"
+        ? user.id
+        : Number(body.memberId || task.member_id);
+      const assignment = db.prepare(`
+        SELECT * FROM task_assignees WHERE task_id = ? AND member_id = ?
+      `).get(task.id, completionMemberId);
+      if (!assignment) failure("该成员没有被分配这项日程", 403);
+      if (assignment.status !== "active") failure("该成员尚未接受这项任务", 409);
       if (date > today) failure("不能提前完成未来的日程");
-      const assigned = memberInFamily(db, task.member_id, family.id);
+      const assigned = memberInFamily(db, completionMemberId, family.id);
       const existing = db.prepare(`
         SELECT * FROM completions
         WHERE task_id = ? AND member_id = ? AND occurrence_date = ?
-      `).get(task.id, task.member_id, date);
+      `).get(task.id, completionMemberId, date);
       if (existing && existing.status !== "rejected") {
         failure(existing.status === "approved" ? "这项日程已经完成" : "这项日程正在等待家长审核", 409);
       }
@@ -1499,7 +1635,7 @@ function createApplication({
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
               task.id,
-              task.member_id,
+              completionMemberId,
               date,
               status,
               task.points,

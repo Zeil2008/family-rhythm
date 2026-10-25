@@ -100,7 +100,8 @@ test("parent creates an agreed task that starts pending child acceptance", async
   assert.equal(created.response.status, 201);
   taskId = created.payload.task.id;
   assert.equal(created.payload.task.taskType, "agreed");
-  assert.equal(created.payload.task.workflowStatus, "pending_acceptance");
+  assert.equal(created.payload.task.workflowStatus, "active");
+  assert.equal(created.payload.task.members[0].acceptanceStatus, "pending_acceptance");
 
   const beforeAcceptance = await request(
     `/api/occurrences?start=${today()}&end=${today()}`,
@@ -125,7 +126,11 @@ test("child accepts an agreed task but cannot edit its agreed definition", async
   const dashboard = await request("/api/dashboard", { cookie: childCookie });
   const inbox = dashboard.payload.taskInbox.find((item) => item.id === taskId);
   assert.ok(inbox);
-  assert.equal(inbox.workflowStatus, "pending_acceptance");
+  assert.equal(inbox.workflowStatus, "active");
+  assert.equal(
+    inbox.members.find((member) => member.id === childId).acceptanceStatus,
+    "pending_acceptance"
+  );
 
   const edit = await request(`/api/tasks/${taskId}`, {
     method: "PUT",
@@ -140,6 +145,7 @@ test("child accepts an agreed task but cannot edit its agreed definition", async
   });
   assert.equal(accepted.response.status, 200);
   assert.equal(accepted.payload.task.workflowStatus, "active");
+  assert.equal(accepted.payload.task.members[0].acceptanceStatus, "active");
 });
 
 test("each user can upload their own photo avatar without member-management permission", async () => {
@@ -249,7 +255,8 @@ test("editing an accepted agreement requires the child to accept it again", asyn
     body: { title: "整理书桌和文件袋" },
   });
   assert.equal(edited.response.status, 200);
-  assert.equal(edited.payload.task.workflowStatus, "pending_acceptance");
+  assert.equal(edited.payload.task.workflowStatus, "active");
+  assert.equal(edited.payload.task.members[0].acceptanceStatus, "pending_acceptance");
 
   const again = await request(`/api/tasks/${taskId}/accept`, {
     method: "POST",
@@ -257,6 +264,7 @@ test("editing an accepted agreement requires the child to accept it again", asyn
   });
   assert.equal(again.response.status, 200);
   assert.equal(again.payload.task.workflowStatus, "active");
+  assert.equal(again.payload.task.members[0].acceptanceStatus, "active");
 });
 
 test("child-created tasks wait for parent approval before they appear", async () => {
@@ -331,6 +339,89 @@ test("child cannot use parent-only management endpoints", async () => {
   });
   assert.equal(created.response.status, 403);
   assert.match(created.payload.error, /家长/);
+});
+
+test("one schedule can be assigned to multiple members with independent acceptance", async () => {
+  const secondChild = await request("/api/members", {
+    method: "POST",
+    cookie: parentCookie,
+    body: { name: "小禾", role: "child", pin: "2468" },
+  });
+  assert.equal(secondChild.response.status, 201);
+  const secondChildId = secondChild.payload.member.id;
+
+  const created = await request("/api/tasks", {
+    method: "POST",
+    cookie: parentCookie,
+    body: {
+      title: "全家一起阅读",
+      memberIds: [childId, secondChildId],
+      category: "阅读",
+      points: 1,
+      startDate: today(),
+      recurrence: "daily",
+      requireApproval: true,
+    },
+  });
+  assert.equal(created.response.status, 201);
+  assert.deepEqual(
+    created.payload.task.memberIds.sort((a, b) => a - b),
+    [childId, secondChildId].sort((a, b) => a - b)
+  );
+  assert.ok(
+    created.payload.task.members.every(
+      (member) => member.acceptanceStatus === "pending_acceptance"
+    )
+  );
+
+  const secondLogin = await request("/api/login", {
+    method: "POST",
+    body: { memberId: secondChildId, pin: "2468" },
+  });
+  const secondCookie = sessionCookie(secondLogin.response);
+
+  const firstInbox = await request("/api/dashboard", { cookie: childCookie });
+  const secondInbox = await request("/api/dashboard", { cookie: secondCookie });
+  assert.ok(firstInbox.payload.taskInbox.some((task) => task.id === created.payload.task.id));
+  assert.ok(secondInbox.payload.taskInbox.some((task) => task.id === created.payload.task.id));
+
+  const firstAcceptance = await request(`/api/tasks/${created.payload.task.id}/accept`, {
+    method: "POST",
+    cookie: childCookie,
+  });
+  assert.equal(firstAcceptance.response.status, 200);
+  const afterFirstAcceptance = await request(
+    `/api/occurrences?start=${today()}&end=${today()}`,
+    { cookie: parentCookie }
+  );
+  assert.deepEqual(
+    afterFirstAcceptance.payload.occurrences
+      .filter((occurrence) => occurrence.taskId === created.payload.task.id)
+      .map((occurrence) => occurrence.memberId),
+    [childId]
+  );
+
+  assert.equal(
+    (
+      await request(`/api/tasks/${created.payload.task.id}/accept`, {
+        method: "POST",
+        cookie: secondCookie,
+      })
+    ).response.status,
+    200
+  );
+
+  const occurrences = await request(
+    `/api/occurrences?start=${today()}&end=${today()}`,
+    { cookie: parentCookie }
+  );
+  const shared = occurrences.payload.occurrences.filter(
+    (occurrence) => occurrence.taskId === created.payload.task.id
+  );
+  assert.deepEqual(
+    shared.map((occurrence) => occurrence.memberId).sort((a, b) => a - b),
+    [childId, secondChildId].sort((a, b) => a - b)
+  );
 });
 
 test("reward redemption reserves points and parent approval finalizes it", async () => {

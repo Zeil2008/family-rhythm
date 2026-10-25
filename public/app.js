@@ -600,7 +600,12 @@ function taskInboxSection(tasks) {
       </div>
       <div class="inbox-list">
         ${tasks.map((task) => {
-          const isAgreement = task.taskType === "agreed" && task.workflowStatus === "pending_acceptance";
+          const myAssignment = task.members?.find(
+            (member) => member.id === state.user.id
+          );
+          const isAgreement =
+            task.taskType === "agreed" &&
+            myAssignment?.acceptanceStatus === "pending_acceptance";
           const isReview = task.workflowStatus === "pending_approval";
           const isRejected = task.workflowStatus === "rejected";
           return `
@@ -741,7 +746,7 @@ async function renderToday(content) {
             <div class="hero-meta">
               <span class="hero-chip">${ICONS.star}${dashboard.user.points} 积分</span>
               <span class="hero-chip">${ICONS.check}${dashboard.user.role === "parent" ? "今日完成率 " + progress + "%" : mine.streak + " 天连续达标"}</span>
-              ${pendingAgreements ? `<span class="hero-chip">🤝${pendingAgreements} 份约定待接受</span>` : ""}
+              ${pendingAgreements ? `<span class="hero-chip">🤝${pendingAgreements} 人次待接受</span>` : ""}
               ${dashboard.pendingDeductionAgreements ? `<span class="hero-chip">⚠️${dashboard.pendingDeductionAgreements} 项扣分约定待接受</span>` : ""}
             </div>
           </div>
@@ -1260,7 +1265,7 @@ async function renderManage(content) {
         <div class="metric-card accent"><span>待处理事项</span><strong>${state.reviewCount}</strong></div>
         <div class="metric-card"><span>本周家庭完成率</span><strong>${average}%</strong></div>
         <div class="metric-card"><span>本周赚取积分</span><strong>${weekPoints}</strong></div>
-        <div class="metric-card"><span>已生效日程</span><strong>${state.manageTasks.filter((task) => task.workflowStatus === "active").length}</strong></div>
+        <div class="metric-card"><span>日程模版</span><strong>${state.manageTasks.length}</strong></div>
       </section>
 
       <section class="card section-card">
@@ -1333,7 +1338,12 @@ async function renderManage(content) {
               state.manageTasks.length
                 ? `<div class="table-list">${state.manageTasks.map((task) => {
                     const typeLabel = task.taskType === "custom" ? "自建" : "约定";
-                    const workflowLabel = {
+                    const pendingCount = (task.members || []).filter(
+                      (member) => member.acceptanceStatus === "pending_acceptance"
+                    ).length;
+                    const workflowLabel = task.taskType === "agreed" && pendingCount
+                      ? `${pendingCount} 人待接受`
+                      : {
                       pending_acceptance: "等待孩子接受",
                       pending_approval: "等待家长审核",
                       active: "已生效",
@@ -1348,11 +1358,9 @@ async function renderManage(content) {
                           <small>${typeLabel} · ${workflowLabel} · +${task.points} 分</small>
                         </div>
                       </div>
-                      <div class="table-cell">${miniAvatar({
-                        avatarUrl: task.memberAvatarUrl,
-                        name: task.memberName,
-                        color: task.memberColor,
-                      })} ${escapeHtml(task.memberName)}</div>
+                      <div class="table-cell task-assignees">${(task.members || []).map((member) => `
+                        <span class="assignee-item">${miniAvatar(member)}<span>${escapeHtml(member.name)}</span></span>
+                      `).join("")}</div>
                       <div class="table-cell"><small>${task.dueTime || "时间灵活"} · ${recurrenceLabel(task)}</small></div>
                       <div class="table-actions">
                         ${task.taskType === "agreed" ? `<button class="icon-btn" data-action="edit-task" data-task-id="${task.id}" aria-label="编辑约定">${ICONS.edit}</button>` : ""}
@@ -1493,8 +1501,11 @@ async function openTaskModal(task = null) {
     (member) => member.active && (!isChild || member.id === state.user.id)
   );
   if (!members.length) return toast("请先添加一位家庭成员", "error");
-  const selectedMember =
-    task?.memberId || members.find((member) => member.role === "child")?.id || members[0].id;
+  const selectedMemberIds = new Set(
+    task?.memberIds?.length
+      ? task.memberIds
+      : [members.find((member) => member.role === "child")?.id || members[0].id]
+  );
   const chosenWeekdays = task?.weekdays || [];
   const categories = ["习惯", "学习", "家务", "运动", "亲情", "阅读", "艺术", "其他"];
   const weekNames = ["一", "二", "三", "四", "五", "六", "日"];
@@ -1531,20 +1542,27 @@ async function openTaskModal(task = null) {
         ${
           isChild
             ? `<div class="locked-member">${avatar(state.user)}<div><strong>${escapeHtml(state.user.name)}</strong><small>自建任务会提交给家长审核</small></div></div>`
-            : `<div class="form-grid">
-          <div class="field">
-            <label for="task-member">分配给</label>
-            <select class="select" id="task-member" name="memberId" required>
-              ${members.map((member) => `<option value="${member.id}" ${member.id === selectedMember ? "selected" : ""}>${escapeHtml(member.name)} · ${roleLabel(member.role)}</option>`).join("")}
-            </select>
-          </div>
-          <div class="field">
-            <label for="task-category">分类</label>
-            <select class="select" id="task-category" name="category">
-              ${categories.map((category) => `<option ${category === (task?.category || "习惯") ? "selected" : ""}>${category}</option>`).join("")}
-            </select>
-          </div>
-        </div>`
+            : `
+              <div class="field">
+                <span class="field-label">分配给（可同时选择多人）</span>
+                <div class="member-multiselect">
+                  ${members.map((member) => `
+                    <label class="member-select-option">
+                      <input type="checkbox" name="memberIds" value="${member.id}" ${selectedMemberIds.has(member.id) ? "checked" : ""}>
+                      ${avatar(member)}
+                      <span><strong>${escapeHtml(member.name)}</strong><small>${roleLabel(member.role)}</small></span>
+                    </label>
+                  `).join("")}
+                </div>
+                <span class="field-hint">每位孩子需要分别接受约定，并独立提交自己的完成成果。</span>
+              </div>
+              <div class="field">
+                <label for="task-category">分类</label>
+                <select class="select" id="task-category" name="category">
+                  ${categories.map((category) => `<option ${category === (task?.category || "习惯") ? "selected" : ""}>${category}</option>`).join("")}
+                </select>
+              </div>
+            `
         }
         ${
           isChild
@@ -1994,9 +2012,14 @@ async function handleSubmit(event) {
       const weekdays = [...form.querySelectorAll('input[name="weekday"]:checked')].map(
         (input) => Number(input.value)
       );
+      const memberIds = state.user.role === "child"
+        ? [state.user.id]
+        : data.getAll("memberIds").map(Number).filter(Number.isInteger);
+      if (!memberIds.length) throw new Error("请至少选择一位家庭成员");
       const body = {
         title: data.get("title"),
-        memberId: Number(data.get("memberId")),
+        memberId: memberIds[0],
+        memberIds,
         category: data.get("category"),
         points: Number(data.get("points")),
         dueTime: data.get("dueTime") || null,

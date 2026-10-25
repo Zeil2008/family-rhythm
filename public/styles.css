@@ -1408,6 +1408,63 @@ p {
   line-height: 1.65;
 }
 
+.member-multiselect {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.member-select-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fffefa;
+  cursor: pointer;
+}
+
+.member-select-option:has(input:checked) {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+  box-shadow: inset 0 0 0 1px var(--teal);
+}
+
+.member-select-option input {
+  accent-color: var(--teal);
+}
+
+.member-select-option .avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+}
+
+.member-select-option strong {
+  display: block;
+  font-size: 12px;
+}
+
+.member-select-option small {
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.task-assignees {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.assignee-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
 .locked-member,
 .completion-summary {
   display: flex;
@@ -2876,6 +2933,10 @@ p {
 
   .inbox-item {
     flex-wrap: wrap;
+  }
+
+  .member-multiselect {
+    grid-template-columns: 1fr;
   }
 
   .deduction-manage-row,

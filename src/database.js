@@ -87,6 +87,15 @@ function openDatabase(dbPath) {
       UNIQUE (task_id, member_id, occurrence_date)
     );
 
+    CREATE TABLE IF NOT EXISTS task_assignees (
+      task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'pending_acceptance'
+        CHECK (status IN ('pending_acceptance', 'active')),
+      accepted_at TEXT,
+      PRIMARY KEY (task_id, member_id)
+    );
+
     CREATE TABLE IF NOT EXISTS point_transactions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
@@ -158,6 +167,8 @@ function openDatabase(dbPath) {
 
     CREATE INDEX IF NOT EXISTS idx_tasks_family_member ON tasks(family_id, member_id, archived);
     CREATE INDEX IF NOT EXISTS idx_completions_occurrence ON completions(occurrence_date, status);
+    CREATE INDEX IF NOT EXISTS idx_task_assignees_member
+      ON task_assignees(member_id, status);
     CREATE INDEX IF NOT EXISTS idx_points_member_date ON point_transactions(member_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_redemptions_member_status ON redemptions(member_id, status);
     CREATE INDEX IF NOT EXISTS idx_deduction_rules_family
@@ -185,6 +196,22 @@ function openDatabase(dbPath) {
   addMissingColumn("members", "avatar_path", "TEXT");
 
   db.exec(`
+    INSERT OR IGNORE INTO task_assignees (task_id, member_id, status, accepted_at)
+    SELECT
+      t.id,
+      t.member_id,
+      CASE
+        WHEN t.workflow_status = 'pending_acceptance' THEN 'pending_acceptance'
+        WHEN t.task_type = 'custom'
+          AND t.workflow_status IN ('pending_approval', 'rejected') THEN 'pending_acceptance'
+        ELSE 'active'
+      END,
+      CASE WHEN t.workflow_status = 'active' THEN COALESCE(t.accepted_at, t.created_at) ELSE NULL END
+    FROM tasks t
+    WHERE NOT EXISTS (
+      SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_workflow
       ON tasks(family_id, member_id, workflow_status, archived);
   `);
